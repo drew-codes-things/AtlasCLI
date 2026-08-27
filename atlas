@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""
+atlas - the Drew's Realm knowledge base, in the terminal.
+
+Reads the same generated bank the website uses (atlas/bank.js), so there
+is no second copy of the content to keep in step. The bank is fetched
+once and cached; everything after that works offline.
+
+    atlas subnetting
+    atlas -c networking --random
+    atlas -l
+
+Standard library only, single file. Drop it on PATH and it works.
+"""
+
+import argparse
+import difflib
+import json
+import os
+import random
+import shutil
+import sys
+import textwrap
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DEFAULT_SOURCE = 'https://drew-gnr.xyz/atlas/bank.js'
+NETWORK_TIMEOUT_SECONDS = 15
+CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+MAX_RENDER_WIDTH = 88
+FUZZY_FLOOR = 0.70
+
+# Palette from Assets/style.css; difficulty tints from atlas/study.js.
+SIGNAL = (255, 77, 46)
+PHOSPHOR = (53, 214, 124)
+AMBER = (255, 176, 32)
+ORANGE = (255, 140, 66)
+TEXT_DIM = (125, 136, 145)
+TEXT_FAINT = (75, 84, 92)
+
+DIFFICULTIES = (
+    ('Easy', PHOSPHOR),
+    ('Medium', AMBER),
+    ('Hard', ORANGE),
+    ('Extreme', SIGNAL),
+)
+
+KIND_LABELS = {'t': 'topic', 'd': 'definition'}
+KIND_FLAGS = {'topic': 't', 'definition': 'd', 'def': 'd'}
+
+
+class Ink:
+    """ANSI colour, or a no-op when the output is not a terminal."""
+
+    def __init__(self, enabled):
+        self.enabled = enabled
+
+    def __call__(self, text, rgb=None, bold=False):
+        if not self.enabled or (rgb is None and not bold):
+            return text
+        prefix = ''
+        if bold:
+            prefix += '\033[1m'
+        if rgb is not None:
+            prefix += '\033[38;2;{};{};{}m'.format(*rgb)
+        return prefix + text + '\033[0m'
+
+
+def want_colour(no_colour_flag):
+    if no_colour_flag or os.environ.get('NO_COLOR'):
+        return False
+    return sys.stdout.isatty()
+
+
+def cache_path():
+    base = os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache'
+    return Path(base) / 'atlas' / 'bank.js'
+
+
+def is_url(source):
+    return source.startswith(('http://', 'https://'))
+
+
+def parse_bank(raw):
+    """bank.js is `window.ATLAS_BANK = {...};` - strip the wrapper."""
+    start = raw.find('{')
+    if start == -1:
+        raise ValueError('no JSON object found in the bank file')
+
+    payload = raw[start:].rstrip().rstrip(';')
+    try:
+        bank = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ValueError('bank file is not valid JSON: {}'.format(error)) from error
+
+    if not isinstance(bank.get('items'), list) or not isinstance(bank.get('cats'), dict):
+        raise ValueError('bank file is missing "items" or "cats"')
+    return bank
+
+
+def fetch_bank(source):
+    request = urllib.request.Request(source, headers={'User-Agent': 'atlas-cli'})
+    with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
+        return response.read().decode('utf-8')
+
+
+def cache_is_fresh(path):
+    if not path.exists():
+        return False
+    age_seconds = time.time() - path.stat().st_mtime
+    return age_seconds < CACHE_MAX_AGE_SECONDS
+
+
+def load_bank(source, refresh):
+    """Local path wins outright. A URL goes through the cache."""
+    if not is_url(source):
+        path = Path(source).expanduser()
+        if not path.exists():
+            raise SystemExit('atlas: no such bank file: {}'.format(path))
+        return parse_bank(path.read_text(encoding='utf-8'))
+
+    cache = cache_path()
+    if not refresh and cache_is_fresh(cache):
+        try:
+            return parse_bank(cache.read_text(encoding='utf-8'))
+        except (ValueError, OSError):
+            pass  # corrupt or unreadable cache, fall through and refetch
+
+    try:
+        raw = fetch_bank(source)
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        if cache.exists():
+            warn('could not reach {} ({}), using the cached copy'.format(source, error))
+            return parse_bank(cache.read_text(encoding='utf-8'))
+        raise SystemExit('atlas: cannot fetch {}: {}'.format(source, error))
+
+    bank = parse_bank(raw)  # validate before overwriting a good cache
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(raw, encoding='utf-8')
+    except OSError as error:
+        warn('could not write the cache ({})'.format(error))
+    return bank
+
+
+def warn(message):
+    print('atlas: {}'.format(message), file=sys.stderr)
+
+
+def matches_filters(item, category, difficulty, kind):
+    if category and item.get('c') != category:
+        return False
+    if difficulty is not None and item.get('d') != difficulty:
+        return False
+    if kind and item.get('k') != kind:
+        return False
+    return True
+
+
+def score_item(query, item):
+    """
+    Exact title beats prefix beats substring beats same-page sibling beats
+    fuzzy beats a passing mention in the body.
+
+    Every weaker tier carries a similarity tiebreaker, because whole groups
+    of entries share a slug: searching "subnetting" makes every definition
+    on the subnetting page a slug match, and without the tiebreak they tie
+    at one score and come out in alphabetical order.
+    """
+    term = item.get('q', '').lower()
+    if not term:
+        return 0
+
+    if term == query:
+        return 1000
+    if term.startswith(query):
+        return 900 - (len(term) - len(query))
+    if query in term:
+        return 800 - term.index(query)
+
+    ratio = difflib.SequenceMatcher(None, query, term).ratio()
+    nudge = int(ratio * 50)
+
+    if query in item.get('s', '').lower():
+        return 600 + nudge
+    if ratio >= FUZZY_FLOOR:
+        return 300 + int(ratio * 200)
+    if query in item.get('a', '').lower():
+        return 200 + nudge
+    return 0
+
+
+def search(bank, query, category, difficulty, kind, limit):
+    needle = query.lower().strip()
+    scored = []
+    for item in bank['items']:
+        if not matches_filters(item, category, difficulty, kind):
+            continue
+        points = score_item(needle, item)
+        if points > 0:
+            scored.append((points, item))
+
+    scored.sort(key=lambda pair: (-pair[0], pair[1].get('q', '')))
+    return [item for _points, item in scored[:limit]]
+
+
+def pick_random(bank, category, difficulty, kind):
+    pool = [
+        item for item in bank['items']
+        if matches_filters(item, category, difficulty, kind)
+    ]
+    return random.choice(pool) if pool else None
+
+
+def resolve_category(bank, wanted):
+    """Accept either the id ('networking') or the label ('Networking')."""
+    if not wanted:
+        return None
+    needle = wanted.lower()
+    for cat_id, label in bank['cats'].items():
+        if needle in (cat_id.lower(), label.lower()):
+            return cat_id
+
+    close = [
+        cat_id for cat_id, label in bank['cats'].items()
+        if needle in cat_id.lower() or needle in label.lower()
+    ]
+    if len(close) == 1:
+        return close[0]
+    if close:
+        raise SystemExit('atlas: "{}" matches several categories: {}'.format(
+            wanted, ', '.join(sorted(close))))
+    raise SystemExit('atlas: no category "{}". Try: atlas -l'.format(wanted))
+
+
+def render_width():
+    return min(shutil.get_terminal_size((80, 24)).columns, MAX_RENDER_WIDTH)
+
+
+def difficulty_badge(item, ink):
+    index = item.get('d')
+    if not isinstance(index, int) or not 0 <= index < len(DIFFICULTIES):
+        return ''
+    name, rgb = DIFFICULTIES[index]
+    return ink(name, rgb)
+
+
+def render_item(item, bank, ink, width):
+    category = bank['cats'].get(item.get('c'), item.get('c', ''))
+    kind = KIND_LABELS.get(item.get('k'), '')
+
+    meta = [ink(category.upper(), SIGNAL)]
+    if kind:
+        meta.append(ink(kind, TEXT_DIM))
+    badge = difficulty_badge(item, ink)
+    if badge:
+        meta.append(badge)
+
+    lines = ['', ink('// ', TEXT_FAINT) + ' · '.join(meta)]
+    lines.append(ink(item.get('q', ''), bold=True))
+
+    body = textwrap.fill(
+        item.get('a', ''),
+        width=width - 2,
+        initial_indent='  ',
+        subsequent_indent='  ',
+    )
+    lines.append(body)
+
+    slug = item.get('s')
+    if slug:
+        lines.append(ink('  atlas/docs/#{}'.format(slug), TEXT_FAINT))
+    return '\n'.join(lines)
+
+
+def render_summary(item, bank, ink):
+    category = bank['cats'].get(item.get('c'), item.get('c', ''))
+    return '  {}  {}'.format(
+        ink(item.get('q', ''), TEXT_DIM),
+        ink(category, TEXT_FAINT),
+    )
+
+
+def list_categories(bank, ink):
+    counts = {}
+    for item in bank['items']:
+        counts[item.get('c')] = counts.get(item.get('c'), 0) + 1
+
+    rows = sorted(bank['cats'].items(), key=lambda pair: pair[1].lower())
+    longest = max((len(label) for _id, label in rows), default=0)
+
+    print()
+    print(ink('// {} CATEGORIES'.format(len(rows)), SIGNAL))
+    print()
+    for cat_id, label in rows:
+        print('  {}  {}  {}'.format(
+            label.ljust(longest),
+            ink(str(counts.get(cat_id, 0)).rjust(4), TEXT_DIM),
+            ink(cat_id, TEXT_FAINT),
+        ))
+    print()
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog='atlas',
+        description='The Drew\'s Realm knowledge base, in the terminal.',
+        epilog='Examples:\n'
+               '  atlas subnetting\n'
+               '  atlas -c networking -r\n'
+               '  atlas -c linux -d 3 permissions\n'
+               '  atlas -l',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('query', nargs='*', help='what to look up')
+    parser.add_argument('-c', '--category', help='limit to one category (id or name)')
+    parser.add_argument('-d', '--difficulty', type=int, choices=range(len(DIFFICULTIES)),
+                        help='0 easy, 1 medium, 2 hard, 3 extreme')
+    parser.add_argument('-k', '--kind', choices=sorted(KIND_FLAGS),
+                        help='topic or definition only')
+    parser.add_argument('-n', '--limit', type=int, default=6,
+                        help='how many matches to consider (default 6)')
+    parser.add_argument('-r', '--random', action='store_true', help='one random entry')
+    parser.add_argument('-a', '--all', action='store_true',
+                        help='print every match in full, not just the best one')
+    parser.add_argument('-l', '--list', action='store_true', help='list the categories')
+    parser.add_argument('--update', action='store_true', help='refresh the cached bank')
+    parser.add_argument('--source', default=os.environ.get('ATLAS_BANK', DEFAULT_SOURCE),
+                        help='bank.js URL or local path')
+    parser.add_argument('--no-color', action='store_true', help='disable colour')
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    ink = Ink(want_colour(args.no_color))
+
+    if not (args.query or args.random or args.list or args.update):
+        parser.print_help()
+        return 0
+
+    try:
+        bank = load_bank(args.source, args.update)
+    except ValueError as error:
+        raise SystemExit('atlas: {}'.format(error))
+
+    if args.update:
+        print('atlas: bank updated, built {}, {} entries'.format(
+            bank.get('built', 'unknown'), len(bank['items'])))
+        if not (args.query or args.random or args.list):
+            return 0
+
+    category = resolve_category(bank, args.category)
+    kind = KIND_FLAGS.get(args.kind) if args.kind else None
+    width = render_width()
+
+    if args.list:
+        list_categories(bank, ink)
+        return 0
+
+    if args.random:
+        item = pick_random(bank, category, args.difficulty, kind)
+        if item is None:
+            raise SystemExit('atlas: nothing matches those filters')
+        print(render_item(item, bank, ink, width))
+        print()
+        return 0
+
+    query = ' '.join(args.query)
+    results = search(bank, query, category, args.difficulty, kind, args.limit)
+    if not results:
+        print('atlas: nothing found for "{}"'.format(query), file=sys.stderr)
+        return 1
+
+    if args.all:
+        for item in results:
+            print(render_item(item, bank, ink, width))
+        print()
+        return 0
+
+    print(render_item(results[0], bank, ink, width))
+    if len(results) > 1:
+        print()
+        print(ink('  other matches', TEXT_FAINT))
+        for item in results[1:]:
+            print(render_summary(item, bank, ink))
+    print()
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
