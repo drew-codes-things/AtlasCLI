@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""
-atlas - the Drew's Realm knowledge base, in the terminal.
-
-Reads the same generated bank the website uses (atlas/bank.js), so there
-is no second copy of the content to keep in step. The bank is fetched
-once and cached; everything after that works offline.
-
-    atlas subnetting
-    atlas -c networking --random
-    atlas -l
-
-Standard library only, single file. Drop it on PATH and it works.
-"""
 
 import argparse
 import difflib
@@ -32,7 +19,6 @@ CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 MAX_RENDER_WIDTH = 88
 FUZZY_FLOOR = 0.70
 
-# Palette from Assets/style.css; difficulty tints from atlas/study.js.
 SIGNAL = (255, 77, 46)
 PHOSPHOR = (53, 214, 124)
 AMBER = (255, 176, 32)
@@ -52,7 +38,6 @@ KIND_FLAGS = {'topic': 't', 'definition': 'd', 'def': 'd'}
 
 
 class Ink:
-    """ANSI colour, or a no-op when the output is not a terminal."""
 
     def __init__(self, enabled):
         self.enabled = enabled
@@ -84,7 +69,6 @@ def is_url(source):
 
 
 def parse_bank(raw):
-    """bank.js is `window.ATLAS_BANK = {...};` - strip the wrapper."""
     start = raw.find('{')
     if start == -1:
         raise ValueError('no JSON object found in the bank file')
@@ -114,7 +98,6 @@ def cache_is_fresh(path):
 
 
 def load_bank(source, refresh):
-    """Local path wins outright. A URL goes through the cache."""
     if not is_url(source):
         path = Path(source).expanduser()
         if not path.exists():
@@ -126,7 +109,7 @@ def load_bank(source, refresh):
         try:
             return parse_bank(cache.read_text(encoding='utf-8'))
         except (ValueError, OSError):
-            pass  # corrupt or unreadable cache, fall through and refetch
+            pass
 
     try:
         raw = fetch_bank(source)
@@ -136,7 +119,7 @@ def load_bank(source, refresh):
             return parse_bank(cache.read_text(encoding='utf-8'))
         raise SystemExit('atlas: cannot fetch {}: {}'.format(source, error))
 
-    bank = parse_bank(raw)  # validate before overwriting a good cache
+    bank = parse_bank(raw)
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(raw, encoding='utf-8')
@@ -160,15 +143,6 @@ def matches_filters(item, category, difficulty, kind):
 
 
 def score_item(query, item):
-    """
-    Exact title beats prefix beats substring beats same-page sibling beats
-    fuzzy beats a passing mention in the body.
-
-    Every weaker tier carries a similarity tiebreaker, because whole groups
-    of entries share a slug: searching "subnetting" makes every definition
-    on the subnetting page a slug match, and without the tiebreak they tie
-    at one score and come out in alphabetical order.
-    """
     term = item.get('q', '').lower()
     if not term:
         return 0
@@ -215,7 +189,6 @@ def pick_random(bank, category, difficulty, kind):
 
 
 def resolve_category(bank, wanted):
-    """Accept either the id ('networking') or the label ('Networking')."""
     if not wanted:
         return None
     needle = wanted.lower()
@@ -303,6 +276,13 @@ def list_categories(bank, ink):
     print()
 
 
+def positive_int(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError('must be at least 1')
+    return number
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog='atlas',
@@ -320,7 +300,7 @@ def build_parser():
                         help='0 easy, 1 medium, 2 hard, 3 extreme')
     parser.add_argument('-k', '--kind', choices=sorted(KIND_FLAGS),
                         help='topic or definition only')
-    parser.add_argument('-n', '--limit', type=int, default=6,
+    parser.add_argument('-n', '--limit', type=positive_int, default=6,
                         help='how many matches to consider (default 6)')
     parser.add_argument('-r', '--random', action='store_true', help='one random entry')
     parser.add_argument('-a', '--all', action='store_true',
@@ -338,6 +318,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     ink = Ink(want_colour(args.no_color))
+    args.query = [word for word in args.query if word.strip()]
 
     if not (args.query or args.random or args.list or args.update):
         parser.print_help()
