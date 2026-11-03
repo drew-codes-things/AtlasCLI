@@ -256,11 +256,32 @@ def render_summary(item, bank, ink):
     )
 
 
-def list_categories(bank, ink):
+def item_as_json(item, bank):
+    difficulty = item.get('d')
+    return {
+        'question': item.get('q', ''),
+        'answer': item.get('a', ''),
+        'category': bank['cats'].get(item.get('c'), item.get('c', '')),
+        'category_id': item.get('c'),
+        'kind': KIND_LABELS.get(item.get('k')),
+        'difficulty': DIFFICULTIES[difficulty][0].lower() if isinstance(difficulty, int) and 0 <= difficulty < len(DIFFICULTIES) else None,
+        'link': 'atlas/docs/#{}'.format(item['s']) if item.get('s') else None,
+    }
+
+
+def category_counts(bank):
     counts = {}
     for item in bank['items']:
         counts[item.get('c')] = counts.get(item.get('c'), 0) + 1
+    return counts
 
+
+def print_json(data):
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def list_categories(bank, ink):
+    counts = category_counts(bank)
     rows = sorted(bank['cats'].items(), key=lambda pair: pair[1].lower())
     longest = max((len(label) for _id, label in rows), default=0)
 
@@ -310,6 +331,7 @@ def build_parser():
     parser.add_argument('--source', default=os.environ.get('ATLAS_BANK', DEFAULT_SOURCE),
                         help='bank.js URL or local path')
     parser.add_argument('--no-color', action='store_true', help='disable colour')
+    parser.add_argument('--json', action='store_true', help='print results as JSON, for scripts')
     return parser
 
 
@@ -317,7 +339,7 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    ink = Ink(want_colour(args.no_color))
+    ink = Ink(want_colour(args.no_color) and not args.json)
     args.query = [word for word in args.query if word.strip()]
 
     if not (args.query or args.random or args.list or args.update):
@@ -329,7 +351,7 @@ def main(argv=None):
     except ValueError as error:
         raise SystemExit('atlas: {}'.format(error))
 
-    if args.update:
+    if args.update and not args.json:
         print('atlas: bank updated, built {}, {} entries'.format(
             bank.get('built', 'unknown'), len(bank['items'])))
         if not (args.query or args.random or args.list):
@@ -340,6 +362,11 @@ def main(argv=None):
     width = render_width()
 
     if args.list:
+        if args.json:
+            counts = category_counts(bank)
+            print_json([{'id': cat_id, 'name': label, 'entries': counts.get(cat_id, 0)}
+                        for cat_id, label in sorted(bank['cats'].items(), key=lambda pair: pair[1].lower())])
+            return 0
         list_categories(bank, ink)
         return 0
 
@@ -347,6 +374,9 @@ def main(argv=None):
         item = pick_random(bank, category, args.difficulty, kind)
         if item is None:
             raise SystemExit('atlas: nothing matches those filters')
+        if args.json:
+            print_json(item_as_json(item, bank))
+            return 0
         print(render_item(item, bank, ink, width))
         print()
         return 0
@@ -354,8 +384,14 @@ def main(argv=None):
     query = ' '.join(args.query)
     results = search(bank, query, category, args.difficulty, kind, args.limit)
     if not results:
+        if args.json:
+            print_json([])
         print('atlas: nothing found for "{}"'.format(query), file=sys.stderr)
         return 1
+
+    if args.json:
+        print_json([item_as_json(item, bank) for item in results])
+        return 0
 
     if args.all:
         for item in results:

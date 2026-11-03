@@ -58,6 +58,7 @@ atlas -k definition dns       # definitions only, skip the longer topics
 atlas -a vlsm                 # every match in full, not just the best one
 atlas -l                      # list the 34 categories with entry counts
 atlas --update                # refresh the cached bank now
+atlas --json dns | jq '.[0].answer'   # machine-readable output for scripts
 ```
 
 The best match prints in full; anything else found is listed underneath as
@@ -77,6 +78,7 @@ a one-liner so you can see whether you asked the wrong question.
 | `--update` | Force a refresh of the cached bank. |
 | `--source` | A different `bank.js` URL or local path. |
 | `--no-color` | Disable colour. `NO_COLOR` is honoured too. |
+| `--json` | Print JSON instead: a list of every match (question, answer, category, kind, difficulty, link), one object for `-r`, or the categories with counts for `-l`. Nothing found prints `[]` and exits `1`. |
 
 Colour switches off automatically when output is piped, so
 `atlas dns | less` stays readable.
