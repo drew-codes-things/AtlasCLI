@@ -11,6 +11,8 @@
 
 </div>
 
+![AtlasCLI looking up subnetting](screenshot.png)
+
 ---
 
 ## Overview
