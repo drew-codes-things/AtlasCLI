@@ -107,6 +107,11 @@ def cache_is_fresh(path):
     return age_seconds < CACHE_MAX_AGE_SECONDS
 
 
+def load_cached_copy(cache, reason):
+    warn('{}, using the cached copy'.format(reason))
+    return parse_bank(cache.read_text(encoding='utf-8'))
+
+
 def load_bank(source, refresh):
     if not is_url(source):
         path = Path(source).expanduser()
@@ -125,11 +130,15 @@ def load_bank(source, refresh):
         raw = fetch_bank(source)
     except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException) as error:
         if cache.exists():
-            warn('could not reach {} ({}), using the cached copy'.format(source, error))
-            return parse_bank(cache.read_text(encoding='utf-8'))
+            return load_cached_copy(cache, 'could not reach {} ({})'.format(source, error))
         raise SystemExit('atlas: cannot fetch {}: {}'.format(source, error))
 
-    bank = parse_bank(raw)
+    try:
+        bank = parse_bank(raw)
+    except ValueError as error:
+        if cache.exists():
+            return load_cached_copy(cache, '{} did not return the bank ({})'.format(source, error))
+        raise
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(raw, encoding='utf-8')
