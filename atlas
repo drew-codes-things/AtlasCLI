@@ -20,6 +20,7 @@ NETWORK_TIMEOUT_SECONDS = 15
 CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 CACHE_KEY_LENGTH = 16
 MAX_RENDER_WIDTH = 88
+MIN_RENDER_WIDTH = 20
 FUZZY_FLOOR = 0.70
 
 SIGNAL = (255, 77, 46)
@@ -228,7 +229,8 @@ def resolve_category(bank, wanted):
 
 
 def render_width():
-    return min(shutil.get_terminal_size((80, 24)).columns, MAX_RENDER_WIDTH)
+    columns = shutil.get_terminal_size((80, 24)).columns
+    return max(MIN_RENDER_WIDTH, min(columns, MAX_RENDER_WIDTH))
 
 
 def difficulty_badge(item, ink):
