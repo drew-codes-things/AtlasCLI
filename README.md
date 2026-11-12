@@ -80,7 +80,7 @@ a one-liner so you can see whether you asked the wrong question.
 | `--update` | Force a refresh of the cached bank. |
 | `--source` | A different `bank.js` URL or local path. |
 | `--no-color` | Disable colour. `NO_COLOR` is honoured too. |
-| `--json` | Print JSON instead: a list of every match (question, answer, category, kind, difficulty, link), one object for `-r`, or the categories with counts for `-l`. Nothing found prints `[]` and exits `1`. |
+| `--json` | Print JSON instead: a list of every match (question, answer, category, kind, difficulty, link), one object for `-r`, or the categories with counts for `-l`. Nothing found prints `[]` and exits `1`. `--update` on its own prints the build stamp and entry count. |
 
 Colour switches off automatically when output is piped, so
 `atlas dns | less` stays readable.
@@ -94,7 +94,7 @@ composes properly in scripts.
 |---|---|
 | `ATLAS_BANK` | Bank source, URL or local path. Default `https://drew-gnr.xyz/atlas/bank.js`. |
 | `NO_COLOR` | Set to anything to disable colour output. |
-| `XDG_CACHE_HOME` | Cache location. Defaults to `~/.cache`, giving `~/.cache/atlas/bank.js`. |
+| `XDG_CACHE_HOME` | Cache location. Defaults to `~/.cache`, giving `~/.cache/atlas/bank.js`. A custom source URL gets its own cache file (`bank-<hash>.js`) so two sources never share a cache. |
 
 Point it at a local checkout while working on Atlas itself:
 
